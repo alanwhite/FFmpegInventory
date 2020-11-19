@@ -1,3 +1,9 @@
+
+/*
+	Copyright (c) Alan R.White. All rights reserved.  
+	Licensed under the MIT License. See LICENSE file in the project root for full license information.  
+*/
+
 package xyz.arwhite.ffmpeg;
 
 import static org.bytedeco.ffmpeg.global.avutil.setLogCallback;
@@ -59,7 +65,10 @@ public class FFmpegInventory {
 		return cameraInventory;
 	}
 
-
+	/***
+	 * Re-registers all devices with ffmpeg and populates the provided cameras object
+	 * @param cameras
+	 */
 	public static void refreshCameras(FFmpegInventory cameras) {
 		var cams = cameras.getCameraInventory();
 		cams.clear();
@@ -102,6 +111,12 @@ public class FFmpegInventory {
 		}
 	}
 
+	/***
+	 * Parses the stderr output from the equivalent of ffmpeg -f avfoundation -list_devices true
+	 * @param format
+	 * @param file
+	 * @param cameras
+	 */
 	private static void parseAVFoundation(AVInputFormat format, File file, FFmpegInventory cameras) {
 
 		// extract the device numbers and names from the device lister output
@@ -146,6 +161,11 @@ public class FFmpegInventory {
 
 	}
 
+	/***
+	 * Makes a fake attempt to record video, providing a deliberately bad frame rate to cause
+	 * avfoundation to error out and list the resolutions and frame rates it knows about
+	 * @param cameras
+	 */
 	private static void getAVFoundationDeviceCaps(FFmpegInventory cameras) {
 		var origErr = System.err;
 		File tmp = null;
@@ -167,6 +187,13 @@ public class FFmpegInventory {
 
 	}
 
+	/***
+	 * Parses the stderr from the call to the failed ffmpeg recording attempt to extract the capabilities
+	 * of the device and populates them in the inventory
+	 * @param file
+	 * @param cameras
+	 * @param device
+	 */
 	private static void parseAVFoundationDeviceCaps(File file, FFmpegInventory cameras, Integer device) {
 		// extract the device numbers and names from the device lister output
 		try (BufferedReader br = new BufferedReader(new FileReader(file))) {
@@ -189,8 +216,6 @@ public class FFmpegInventory {
 					continue;
 				}
 
-				// System.out.println(p[1]);
-
 				// if we are past the list of supported modes then we're done
 				if (!p[1].endsWith("fps"))
 					break;
@@ -206,25 +231,26 @@ public class FFmpegInventory {
 				var spaceOff = mode.indexOf(" ");
 				var fps = Double.parseDouble(mode.substring(atOff + 2, spaceOff));
 
-				// System.out.println("Supports "+width+"x"+height+"@"+fps);
-
 				var cam = cameras.getCameraInventory().get(device);
 
 				// check cam modes for this resolution
-				var matchedModeOpt = cam.modes.stream().filter(m -> m.height == height && m.width == width).findFirst();
+				var matchedModeOpt = cam.modes
+						.stream()
+						.filter(m -> m.height == height && m.width == width)
+						.findFirst();
 
-				CameraMode ff = null;
+				CameraMode cameraMode = null;
 				if (matchedModeOpt.isPresent())
-					ff = matchedModeOpt.get();
+					cameraMode = matchedModeOpt.get();
 				else {
-					ff = cameras.new CameraMode();
-					cam.modes.add(ff);
-					ff.height = height;
-					ff.width = width;
-					ff.validFPS = new ArrayList<Double>();
+					cameraMode = cameras.new CameraMode();
+					cam.modes.add(cameraMode);
+					cameraMode.height = height;
+					cameraMode.width = width;
+					cameraMode.validFPS = new ArrayList<Double>();
 				}
 
-				ff.validFPS.add(fps);
+				cameraMode.validFPS.add(fps);
 			}
 
 		} catch (Exception e) {
