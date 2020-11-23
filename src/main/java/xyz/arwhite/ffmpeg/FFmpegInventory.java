@@ -6,8 +6,6 @@
 
 package xyz.arwhite.ffmpeg;
 
-import static org.bytedeco.ffmpeg.global.avutil.setLogCallback;
-
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
@@ -22,6 +20,7 @@ import org.bytedeco.ffmpeg.avutil.LogCallback;
 import org.bytedeco.ffmpeg.global.avdevice;
 import org.bytedeco.javacpp.BytePointer;
 import org.bytedeco.javacv.FFmpegFrameGrabber;
+import static org.bytedeco.ffmpeg.global.avutil.setLogCallback;
 
 public class FFmpegInventory {
 
@@ -30,6 +29,9 @@ public class FFmpegInventory {
 		FFmpegInventory.refreshCameras(this);
 	}
 	
+	/*
+	 * Used to intercept all log messages from ffmpeg native libraries
+	 */
 	static class InventoryCallback extends LogCallback {
 		static final InventoryCallback instance = new InventoryCallback().retainReference();
 
@@ -74,14 +76,18 @@ public class FFmpegInventory {
 		cams.clear();
 
 		var origErr = System.err;
-		avdevice.avdevice_register_all();
+		avdevice.avdevice_register_all(); //<== this can take a noticeable period of time on some systems
 		InventoryCallback.set();
 
-		// first get the list of known AV interfaces, aka formats
+		// first get the list of known AV interfaces, aka formats, from ffmpeg -devices
 		List<AVInputFormat> formats = new ArrayList<>();
 		AVInputFormat inp = null;
 		while ((inp = avdevice.av_input_video_device_next(inp)) != null) {
-			formats.add(inp);
+			switch (inp.name().getString()) {
+			case "avfoundation":
+			case "dshow":
+				formats.add(inp);
+			}	
 		}
 
 		for (AVInputFormat format : formats) {
@@ -98,19 +104,21 @@ public class FFmpegInventory {
 			} catch (Exception e) { e.printStackTrace(); }
 
 			System.setErr(origErr);
-
+			// System.out.println(format.name().getString());
+			
 			switch (format.name().getString()) {
 			case "avfoundation":
 				parseAVFoundation(format, tmp, cameras);
 				getAVFoundationDeviceCaps(cameras);
 				break;
 			case "dshow":
-				System.out.println("Windows implementation tbd still");
+				parseDShow(format, tmp, cameras);
+				getDShowDeviceCaps(cameras);
 				break;
 			}
 		}
 	}
-
+	
 	/***
 	 * Parses the stderr output from the equivalent of ffmpeg -f avfoundation -list_devices true
 	 * @param format
@@ -162,6 +170,96 @@ public class FFmpegInventory {
 	}
 
 	/***
+	 * Parses the stderr output from the equivalent of ffmpeg -f dshow -list_devices true
+	 * @param format
+	 * @param file
+	 * @param cameras
+	 */
+	private static void parseDShow(AVInputFormat format, File file, FFmpegInventory cameras) {
+		
+		int deviceNumber=0;
+		
+		// extract the device numbers and names from the device lister output
+		try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+			boolean foundVideoHeader = false;
+			String line;
+			while ((line = br.readLine()) != null) {
+				// System.out.println(line);
+				// split off the prefix
+				String[] s = line.split("] ", 2);
+				if (s.length != 2)
+					continue;
+
+				// System.out.println(s[1]);
+				
+				// split into a word and rest of line
+				String[] p = s[1].split(" ", 2);
+				if (p.length != 2)
+					continue;
+				
+				// System.out.println(p[0]);
+				// System.out.println(p[1]);
+
+				if (!foundVideoHeader) {
+					if (p[0].equals("DirectShow"))
+						foundVideoHeader = true;
+					continue;
+				}
+
+				// see if we're past the list of devices <===== CHANGE to be a != on something
+				if (p[0].startsWith("DirectShow"))
+					break;
+
+
+				
+			
+				// see if it's the Alternative name and skip
+				var x = p[1].trim();
+				// System.out.println(x);
+				if ( x.startsWith("Alternative") )
+					continue;
+				
+				// processing a video device
+				var f = cameras.new VideoCamera();
+				cameras.getCameraInventory().put(deviceNumber++, f);
+				f.format = "dshow";
+				f.name = p[1].replace("\"","");
+				
+				// System.out.println(f.name);
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+
+	}
+	
+	/***
+	 * Gets output from ffmpeg -f dshow -list_options -i video="camera name"
+	 * @param cameras
+	 */
+	private static void getDShowDeviceCaps(FFmpegInventory cameras) {
+		var origErr = System.err;
+		File tmp = null;
+		var keys = cameras.getCameraInventory().keySet();
+		for (Integer device : keys) {
+			try {
+				tmp = File.createTempFile(Long.toString(System.currentTimeMillis()), null);
+				System.setErr(new PrintStream(tmp));
+
+				FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(
+						"video=" +
+						cameras.getCameraInventory().get(device).name);
+				grabber.setFormat(cameras.getCameraInventory().get(device).format);
+				grabber.setOption("list_options", "true");
+				grabber.start();
+			} catch (Exception e) { e.printStackTrace(); }
+
+			System.setErr(origErr);
+			parseDShowDeviceCaps(tmp, cameras, device);
+		}
+	}
+
+	/***
 	 * Makes a fake attempt to record video, providing a deliberately bad frame rate to cause
 	 * avfoundation to error out and list the resolutions and frame rates it knows about
 	 * @param cameras
@@ -186,7 +284,80 @@ public class FFmpegInventory {
 		}
 
 	}
+	
+	private static void parseDShowDeviceCaps(File file, FFmpegInventory cameras, Integer device) {
+		// extract the device numbers and names from the device lister output
+		try (BufferedReader br = new BufferedReader(new FileReader(file))) {
+			boolean foundPin = false;
+			String line;
+			while ((line = br.readLine()) != null) {
+				// break into 2 pieces, the first half eliminates the [dshow @ .. ]
+				String[] s = line.split("] ", 2);
+				if (s.length != 2)
+					continue;
 
+				// break out the 2nd token into space delimited strings
+				String[] p = s[1].split(" ", 2);
+				if (p.length != 2)
+					continue;
+				
+				if (!foundPin) {
+					if (p[1].startsWith("Pin"))
+						foundPin = true;
+					continue;
+				}
+				
+				// if we are past the list of supported modes then we're done
+				if (p[0].equals("Could")) 
+					break;
+				
+				String[] words = p[1].split(" ");
+				
+				var res=words[4];
+				var minfps=words[5];
+				var maxfps=words[8];
+				
+				var resOff = res.substring(2);
+				var width = Integer.parseInt(resOff.substring(0,resOff.indexOf("x")));
+				var height = Integer.parseInt(resOff.substring(resOff.indexOf("x")+1));
+				
+				var minFPS = Double.parseDouble(minfps.substring(minfps.indexOf("=")+1));
+				var maxFPS = Double.parseDouble(maxfps.substring(maxfps.indexOf("=")+1));
+				
+				var cam = cameras.getCameraInventory().get(device);
+
+				// check cam modes for this resolution
+				var matchedModeOpt = cam.modes
+						.stream()
+						.filter(m -> m.height == height && m.width == width)
+						.findFirst();
+
+				CameraMode cameraMode = null;
+				if (matchedModeOpt.isPresent())
+					cameraMode = matchedModeOpt.get();
+				else {
+					cameraMode = cameras.new CameraMode();
+					cam.modes.add(cameraMode);
+					cameraMode.height = height;
+					cameraMode.width = width;
+					cameraMode.minFPS = 1024.0f;
+					cameraMode.maxFPS = 0.0f;
+				}
+				
+				if ( maxFPS > cameraMode.maxFPS ) 
+					cameraMode.maxFPS = maxFPS;
+				
+				if ( minFPS < cameraMode.minFPS ) 
+					cameraMode.minFPS = minFPS;
+
+				
+
+			}
+		} catch (Exception e) {
+			e.printStackTrace();
+		}
+	}
+	
 	/***
 	 * Parses the stderr from the call to the failed ffmpeg recording attempt to extract the capabilities
 	 * of the device and populates them in the inventory
